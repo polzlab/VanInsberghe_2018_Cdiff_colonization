@@ -1,0 +1,19 @@
+# This config file is used in the Snakefile
+# variables set here can be use in the snakefile or external scripts
+# http://snakemake.readthedocs.io/en/stable/snakefiles/configuration.html#standard-configuration
+primer_params:
+  forward_primer:
+    "GTGCCAGCMGCCGCGGTAA"
+  reverse_primer:
+    "GGACTACHVGGGTWTCTAAT"
+  window:
+    20
+  max_diffs:
+    1
+filter_params:
+  truncLen_forward: 225
+  truncLen_reverse: 220
+  maxEE: 2
+  truncQ: 0
+  maxN: 0
+nbases: 200000000

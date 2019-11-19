@@ -1,0 +1,12 @@
+.libPaths(.libPaths()[2])
+library(dada2)
+
+library(tidyverse)
+seqtab <- readRDS(snakemake@input[["sequence_table_rds"]])
+taxa <- assignTaxonomy(seqtab, "rdp_train_set_16.fa.gz", multithread=TRUE, minBoot=80)
+tt.plus <- addSpecies(taxa, "rdp_species_assignment_16.fa.gz", verbose=TRUE)
+saveRDS(tt.plus, "debug_taxonomy.RDS")
+tt.plus <- as.data.frame(tt.plus)
+colnames(tt.plus) <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+saveRDS(tt.plus, snakemake@output[['taxa']])
+write_csv(tt.plus, snakemake@output[['taxa_csv']])

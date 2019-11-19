@@ -1,0 +1,216 @@
+import os
+import pandas as pd
+import glob
+
+configfile: "config.yaml"
+plate_code = "180808Pol"
+
+
+sample_df = pd.read_csv("file_map.csv")
+
+ALL_SAMPLES = [e[2] for e in list(sample_df[["bmc_sample_code", "sample"]].to_records()) if os.path.isfile(os.path.join("input", "{}/{}_{}_1_sequence.fastq".format(plate_code, plate_code, e[1])))]
+
+rule all:
+  input:
+    expand("output/to_share/{experiment}_{file}.csv",
+           experiment=["Cdiff_PEG"],
+           file=["count_table", "rel_table", "asv_map", "taxa"])
+
+rule plotQualityProfile:
+  input:
+    "output/quality_profile.f.png",
+    "output/quality_profile.r.png"
+
+rule plotErrors:
+  input:
+    "output/error_rates.f.png",
+    "output/error_rates.r.png"
+
+rule plots:
+  input:
+    "output/error_rates.f.png",
+    "output/error_rates.r.png",
+    "output/quality_profile.f.png",
+    "output/quality_profile.r.png"
+
+# real rules that have outputs and do work.
+# snakemake takes the target you give it and constructs a
+# dependency graph of which rules it needs to execute to
+# meet the required target.
+
+rule rename_files:
+    output:
+        expand("proc/00.raw.{sample_and_run_number}.{direction}.fq", sample_and_run_number=ALL_SAMPLES, direction=["f", "r"])
+    run:
+        from shutil import copyfile
+        for sample in ALL_SAMPLES:
+            bmc_code = list(sample_df[sample_df["sample"] == sample]["bmc_sample_code"])[0]
+            copyfile("input/" + plate_code + "/"+plate_code+"_{}_1_sequence.fastq".format(bmc_code), "proc/00.raw.{}.f.fq".format(sample))
+            copyfile("input/" + plate_code + "/"+plate_code+"_{}_2_sequence.fastq".format(bmc_code), "proc/00.raw.{}.r.fq".format(sample))
+
+rule trim_primers:
+    input:
+        forward = "proc/00.raw.{sample_and_run_number}.f.fq",
+        reverse = "proc/00.raw.{sample_and_run_number}.r.fq"
+    output:
+        forward = "proc/0.trim_primer.{sample_and_run_number}.f.fq",
+        reverse = "proc/0.trim_primer.{sample_and_run_number}.r.fq"
+    params:
+        forward_primer = config["primer_params"]["forward_primer"],
+        reverse_primer = config["primer_params"]["reverse_primer"],
+        window = config["primer_params"]["window"],
+        max_diffs = config["primer_params"]["max_diffs"]
+    script:
+        "scripts/0.trim_primers.py"
+
+rule filterAndTrim:
+  input:
+    forward = "proc/0.trim_primer.{sample_and_run_number}.f.fq",
+    reverse = "proc/0.trim_primer.{sample_and_run_number}.r.fq"
+  output:
+    forward = "proc/1.filter.{sample_and_run_number}.f.fq.gz",
+    reverse = "proc/1.filter.{sample_and_run_number}.r.fq.gz"
+  params:
+    truncLen_forward = config["filter_params"]["truncLen_forward"],
+    truncLen_reverse = config["filter_params"]["truncLen_reverse"],
+    maxEE = config["filter_params"]["maxEE"],
+    truncQ = config["filter_params"]["truncQ"],
+    maxN = config["filter_params"]["maxN"]
+  script:
+    "scripts/1.dada2_filterAndTrim.R"
+
+rule derepFastq:
+  input:
+    filtered = "proc/1.filter.{sample_and_run_number}.{direction}.fq.gz"
+  output:
+    derepped = "proc/2.derep.{sample_and_run_number}.{direction}.Rds"
+  script:
+    "scripts/2.dada2_derepFastq.R"
+
+def get_filter_files_for_lane(wildcards):
+  samples_for_lane = sample_df[sample_df["run_code"] == "lane"+str(wildcards.run_number)]["sample"].tolist()
+  return ["proc/1.filter.{}.{}.fq.gz".format(sample, wildcards.direction) for sample in samples_for_lane]
+
+rule learnErrors:
+  input:
+    get_filter_files_for_lane
+  output:
+    error_matrix = "proc/3.learnError_lane{run_number}.{direction}.Rds"
+  params:
+    nbases = config["nbases"]
+  threads:
+    20
+  script:
+    "scripts/3.dada2_learnErrors.R"
+
+rule denoise:
+  input:
+    derepped = "proc/2.derep.{sample}_lane{run_number}.{direction}.Rds",
+    error_matrix = "proc/3.learnError_lane{run_number}.{direction}.Rds"
+  output:
+    denoised = "proc/4.denoise.{sample}_lane{run_number}.{direction}.Rds",
+    sequence_table_rds = "proc/5.seqtab.{sample}_lane{run_number}.{direction}.Rds"
+  threads:
+    8
+  script:
+    "scripts/4.dada2_denoise.R"
+
+
+rule mergeSequenceTables_single_direction:
+  input:
+    expand("proc/5.seqtab.{sample_and_run_number}.{{direction}}.Rds", sample_and_run_number=ALL_SAMPLES)
+  output:
+    sequence_table_rds = "proc/6.merged_seqtab.{direction}.Rds"
+  script:
+    "scripts/6.dada2_mergeSequenceTables_single_direction.R"
+
+rule redenoise:
+  input:
+    derepped = "proc/2.derep.{sample}_lane{run_number}.{direction}.Rds",
+    error_matrix = "proc/3.learnError_lane{run_number}.{direction}.Rds",
+    sequence_table_rds = "proc/6.merged_seqtab.{direction}.Rds"
+  output:
+    denoised = "proc/7.redenoise.{sample}_lane{run_number}.{direction}.Rds"
+  threads:
+    8
+  script:
+    "scripts/7.dada2_redenoise.R"
+
+
+rule mergePairs_makeSequenceTable:
+  input:
+    f_denoised = "proc/7.redenoise.{sample_and_run_number}.f.Rds",
+    f_derepped = "proc/2.derep.{sample_and_run_number}.f.Rds",
+    r_denoised = "proc/7.redenoise.{sample_and_run_number}.r.Rds",
+    r_derepped = "proc/2.derep.{sample_and_run_number}.r.Rds"
+  output:
+    sample_sequence_table = "proc/8.merge_table.{sample_and_run_number}.Rds"
+  script:
+    "scripts/5.dada2_mergePairs_makeSequenceTable.R"
+
+rule mergeSequenceTables:
+  input:
+    expand("proc/8.merge_table.{sample}.Rds", sample=ALL_SAMPLES)
+  output:
+    sequence_table_rds = "output/Cdiff_PEG_sequence_table_unfiltered.Rds"
+  script:
+    "scripts/6.dada2_mergeSequenceTables.R"
+
+rule removeChimeras:
+    input:
+        sequence_table_rds = "output/Cdiff_PEG_sequence_table_unfiltered.Rds"
+    output:
+        sequence_table_rds = "output/Cdiff_PEG_sequence_table_no_chimera.Rds",
+        sequence_table_csv = "output/Cdiff_PEG_sequence_table_no_chimera.csv"
+    threads:
+        20
+    script:
+        "scripts/7.dada2_remove_chimeras.R"
+
+rule assign_taxonomy:
+    input:
+        sequence_table_rds = "output/Cdiff_PEG_sequence_table_no_chimera.Rds"
+    output:
+        taxa = "output/Cdiff_PEG_sequence_table_no_chimera.taxa.Rds",
+        taxa_csv = "output/Cdiff_PEG_sequence_table_no_chimera.taxa.csv"
+    threads:
+        20
+    script:
+        "scripts/9.dada2_assign_taxonomy.R"
+
+rule asv_map:
+    input:
+        sequence_table_rds = "output/Cdiff_PEG_sequence_table_no_chimera.Rds",
+    output:
+        asv_map = "output/Cdiff_PEG_asv_map.csv"
+    script:
+        "scripts/make_asv_map.R"
+
+
+rule asvify:
+    input:
+        sequence_table_rds = "output/Cdiff_PEG_sequence_table_no_chimera.Rds",
+        asv_map = "output/Cdiff_PEG_asv_map.csv",
+        taxa_rds = "output/Cdiff_PEG_sequence_table_no_chimera.taxa.Rds"
+    output:
+        expand("output/to_share/{experiment}_{file}.csv",
+               experiment=["Cdiff_PEG"],
+               file=["count_table", "rel_table", "asv_map", "taxa"])
+    script:
+        "scripts/split_experiments.R"
+
+rule _plotQualityProfile:
+  input:
+    fastq = expand("proc/0.trim_primer.{sample}.{{direction}}.fq", zip, sample=ALL_SAMPLES[1:15])
+  output:
+    plot = "output/quality_profile.{direction}.png"
+  script:
+    "scripts/99.dada2_plotQualityProfile.R"
+
+rule _plotErrors:
+  input:
+    error_matrix = "proc/3.learnError.{direction}.Rds"
+  output:
+    plot = "output/error_rates.{direction}.png"
+  script:
+    "scripts/99.dada2_plotErrors.R"
